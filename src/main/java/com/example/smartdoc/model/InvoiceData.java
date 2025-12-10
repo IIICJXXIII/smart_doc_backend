@@ -26,6 +26,8 @@ public class InvoiceData {
     private Long userId;         //用户id
     private Integer isAnomaly;   // 新增：异常标记 (0=正常, 1=异常)
     private Integer isDeleted = 0;
+    private Integer status = 1;
+    private String auditRemark;
 
     @Transient
     private String rawImageUrl;

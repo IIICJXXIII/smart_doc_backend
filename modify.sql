@@ -62,3 +62,14 @@ ALTER TABLE `invoice_record` ADD COLUMN `is_deleted` TINYINT(1) DEFAULT 0 COMMEN
 -- 2. 刷新旧数据，确保都是 0
 UPDATE `invoice_record` SET `is_deleted` = 0 WHERE `is_deleted` IS NULL;
 
+USE `smartdoc`;
+
+-- 1. 增加状态字段 (0=草稿, 1=待审核, 2=已通过, 3=已驳回)
+ALTER TABLE `invoice_record` ADD COLUMN `status` TINYINT(1) DEFAULT 0 COMMENT '审批状态';
+
+-- 2. 增加审批意见字段
+ALTER TABLE `invoice_record` ADD COLUMN `audit_remark` VARCHAR(255) DEFAULT NULL COMMENT '审批驳回原因';
+
+-- 3. 初始化旧数据为 "已通过" (假设旧数据都有效)
+UPDATE `invoice_record` SET `status` = 2 WHERE `status` = 0;
+
