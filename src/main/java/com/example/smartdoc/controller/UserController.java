@@ -1,12 +1,14 @@
 package com.example.smartdoc.controller;
 
 import cn.hutool.core.util.IdUtil;
+import com.example.smartdoc.model.ChatLog;
 import com.example.smartdoc.model.User;
 import com.example.smartdoc.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -19,6 +21,32 @@ public class UserController {
 
     // 简单的内存 Token 存储 (实际项目建议用 Redis)
     public static Map<String, User> tokenMap = new HashMap<>();
+
+    @Autowired
+    private com.example.smartdoc.repository.ChatLogRepository chatLogRepository;
+
+    // 1. 获取会话列表 (左侧侧边栏用)
+    @GetMapping("/chat/sessions")
+    public Map<String, Object> getSessions(@RequestHeader("Authorization") String token) {
+        User user = tokenMap.get(token);
+        if (user == null) return Map.of("code", 401);
+
+        List<String> sessions = chatLogRepository.findSessionIdsByUserId(user.getId());
+        return Map.of("code", 200, "data", sessions);
+    }
+
+    // 2. 获取某个会话的详细记录 (点击侧边栏时用)
+    @GetMapping("/chat/history")
+    public Map<String, Object> getChatHistory(
+            @RequestHeader("Authorization") String token,
+            @RequestParam("sessionId") String sessionId // 增加参数
+    ) {
+        User user = tokenMap.get(token);
+        if (user == null) return Map.of("code", 401);
+
+        List<ChatLog> logs = chatLogRepository.findByUserIdAndSessionIdOrderByIdAsc(user.getId(), sessionId);
+        return Map.of("code", 200, "data", logs);
+    }
 
     @PostMapping("/login")
     public Map<String, Object> login(@RequestBody User loginUser) {
