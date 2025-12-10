@@ -3,10 +3,14 @@ package com.example.smartdoc.model;
 import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
+import org.hibernate.annotations.SQLDelete;
+import org.hibernate.annotations.Where;
 
 @Data
 @Entity // 1. 标记这是一个数据库实体
 @Table(name = "invoice_record") // 2. 指定数据库表名为 invoice_record
+@SQLDelete(sql = "UPDATE invoice_record SET is_deleted = 1 WHERE id = ?")
+@Where(clause = "is_deleted = 0")
 public class InvoiceData {
 
     @Id // 3. 主键
@@ -21,6 +25,7 @@ public class InvoiceData {
     private String category;     // 分类
     private Long userId;         //用户id
     private Integer isAnomaly;   // 新增：异常标记 (0=正常, 1=异常)
+    private Integer isDeleted = 0;
 
     @Transient
     private String rawImageUrl;

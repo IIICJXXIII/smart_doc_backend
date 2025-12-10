@@ -54,3 +54,11 @@ CREATE TABLE `sys_operation_log` (
                                      INDEX `idx_user_op` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='操作审计日志';
 
+USE `smartdoc`;
+
+-- 1. 增加删除标记 (0=正常, 1=已删除)
+ALTER TABLE `invoice_record` ADD COLUMN `is_deleted` TINYINT(1) DEFAULT 0 COMMENT '逻辑删除标记';
+
+-- 2. 刷新旧数据，确保都是 0
+UPDATE `invoice_record` SET `is_deleted` = 0 WHERE `is_deleted` IS NULL;
+
