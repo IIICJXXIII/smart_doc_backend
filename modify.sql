@@ -25,3 +25,16 @@ ALTER TABLE `sys_chat_log` ADD COLUMN `session_id` VARCHAR(64) NOT NULL DEFAULT 
 
 -- 2. 增加索引，加快查询速度
 ALTER TABLE `sys_chat_log` ADD INDEX `idx_session` (`session_id`);
+
+USE `smartdoc`;
+
+CREATE TABLE `sys_budget` (
+                              `id` bigint(20) NOT NULL AUTO_INCREMENT,
+                              `user_id` bigint(20) NOT NULL COMMENT '用户ID',
+                              `category` varchar(50) NOT NULL COMMENT '分类名称',
+                              `limit_amount` double(10,2) NOT NULL COMMENT '预算限额',
+                              `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
+                              PRIMARY KEY (`id`),
+                              UNIQUE KEY `uk_user_category` (`user_id`, `category`) -- 防止同一用户对同一分类设多条预算
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='预算管理表';
+
