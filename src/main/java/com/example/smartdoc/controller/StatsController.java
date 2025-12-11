@@ -8,9 +8,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import com.example.smartdoc.service.DeepSeekService;
 import com.example.smartdoc.utils.KMeansUtil;
-import java.time.LocalDate;
 
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,71 +29,78 @@ public class StatsController {
     @Autowired
     private DeepSeekService deepSeekService;
 
+    // 1. 获取趋势预测 (修复了年份排序问题)
     @GetMapping("/trend")
     public Map<String, Object> getTrendPrediction(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
         if (user == null) return Map.of("code", 401);
 
-        // 1. 获取数据库真实数据
+        // 1. 获取数据 (现在取到的是最新的12条，但是是倒序的: 2025-12, 2025-11...)
+        // 注意：这里需要在 InvoiceRepository 中把 SQL 改为 ORDER BY month DESC
         List<Object[]> rawData = invoiceRepository.findMonthlyStatsByUserId(user.getId());
+
+        // 2. 🔥 关键步骤：把数据反转回正序 (变成 2025-01 ... 2025-12)
+        Collections.reverse(rawData);
 
         List<String> months = new ArrayList<>();
         List<Double> amounts = new ArrayList<>();
 
         for (Object[] row : rawData) {
-            months.add(row[0].toString()); // 月份
-            amounts.add(Double.parseDouble(row[1].toString())); // 金额
+            months.add(row[0].toString());
+            amounts.add(Double.parseDouble(row[1].toString()));
         }
 
-        // 2. 调用算法进行预测
+        // 3. 预测下个月
         Double nextMonthPrediction = 0.0;
         String nextMonthLabel = "下月预测";
 
         if (!amounts.isEmpty()) {
             nextMonthPrediction = LinearRegressionUtil.predictNext(amounts);
-            // 简单计算下个月份的字符串 (这里简化处理，直接叫"预测值")
+
+            // 自动计算下个月的具体日期字符串 (例如 "2026-01")
+            try {
+                String lastMonthStr = months.get(months.size() - 1);
+                DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM");
+                YearMonth lastMonth = YearMonth.parse(lastMonthStr, fmt);
+                YearMonth nextMonth = lastMonth.plusMonths(1);
+                nextMonthLabel = nextMonth.format(fmt) + " (预测)";
+            } catch (Exception e) {
+                nextMonthLabel = "下月预测";
+            }
         }
 
-        // 3. 封装返回结果
+        // 4. 封装返回结果
         Map<String, Object> data = new HashMap<>();
-        data.put("months", months);         // x轴: ["2025-01", "2025-02"...]
-        data.put("amounts", amounts);       // y轴: [1000, 1200...]
-        data.put("prediction", nextMonthPrediction); // 预测下个月的值
+        data.put("months", months);
+        data.put("amounts", amounts);
+        data.put("prediction", nextMonthPrediction);
+        data.put("nextMonthLabel", nextMonthLabel);
 
         return Map.of("code", 200, "data", data);
     }
 
-    // 新增：获取知识图谱数据
+    // 2. 获取知识图谱数据
     @GetMapping("/graph")
     public Map<String, Object> getKnowledgeGraph(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
         if (user == null) return Map.of("code", 401);
 
-        // 1. 查出该用户所有数据
         List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
 
-        // 2. 构建图谱结构
         List<Map<String, Object>> nodes = new ArrayList<>();
         List<Map<String, Object>> links = new ArrayList<>();
-
-        // 辅助集合去重
         List<String> addedCategories = new ArrayList<>();
         List<String> addedMerchants = new ArrayList<>();
 
-        // A. 添加根节点 (用户自己)
+        // A. 根节点
         Map<String, Object> rootNode = new HashMap<>();
         rootNode.put("id", "ROOT");
         rootNode.put("name", user.getNickname());
-        rootNode.put("symbolSize", 60); // 根节点最大
-        rootNode.put("category", 0);    // 颜色分组索引
+        rootNode.put("symbolSize", 60);
+        rootNode.put("category", 0);
         nodes.add(rootNode);
 
-        // B. 遍历数据构建 分类节点 和 商户节点
-        int categoryIndex = 1; // 颜色分组
-
-        // 统计每个分类的总金额，用于决定节点大小
         Map<String, Double> categoryAmountMap = new HashMap<>();
-        // 统计每个商户的总金额
         Map<String, Double> merchantAmountMap = new HashMap<>();
 
         for (InvoiceData item : list) {
@@ -98,31 +108,28 @@ public class StatsController {
             merchantAmountMap.merge(item.getMerchantName(), item.getAmount(), Double::sum);
         }
 
-        // C. 生成节点和连线
         for (InvoiceData item : list) {
             String cat = item.getCategory();
             String merch = item.getMerchantName();
 
-            // 1. 处理分类节点 (Level 1)
+            // 分类节点
             if (!addedCategories.contains(cat)) {
                 Map<String, Object> catNode = new HashMap<>();
                 catNode.put("id", "CAT_" + cat);
                 catNode.put("name", cat);
-                // 节点大小跟金额挂钩 (基础大小20 + 金额缩放)
                 double size = 20 + Math.log(categoryAmountMap.get(cat) + 1) * 5;
                 catNode.put("symbolSize", Math.min(size, 50));
                 catNode.put("category", 1);
                 nodes.add(catNode);
                 addedCategories.add(cat);
 
-                // 连线：用户 -> 分类
                 Map<String, Object> link = new HashMap<>();
                 link.put("source", "ROOT");
                 link.put("target", "CAT_" + cat);
                 links.add(link);
             }
 
-            // 2. 处理商户节点 (Level 2)
+            // 商户节点
             if (!addedMerchants.contains(merch)) {
                 Map<String, Object> merchNode = new HashMap<>();
                 merchNode.put("id", "MER_" + merch);
@@ -133,7 +140,6 @@ public class StatsController {
                 nodes.add(merchNode);
                 addedMerchants.add(merch);
 
-                // 连线：分类 -> 商户
                 Map<String, Object> link = new HashMap<>();
                 link.put("source", "CAT_" + cat);
                 link.put("target", "MER_" + merch);
@@ -148,55 +154,49 @@ public class StatsController {
         return Map.of("code", 200, "data", result);
     }
 
-    // 新增：K-Means 聚类分析接口
+    // 3. K-Means 聚类分析
     @GetMapping("/clustering")
     public Map<String, Object> getClustering(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
         if (user == null) return Map.of("code", 401);
 
         List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
-
-        // 1. 数据预处理：转为二维点
-        // X轴：每月的几号 (1-31)，反映时间习惯
-        // Y轴：金额，反映消费水平
         List<KMeansUtil.Point> points = new ArrayList<>();
+
         for (InvoiceData item : list) {
             try {
-                // 解析日期 "2025-12-09" -> 9
                 int day = LocalDate.parse(item.getDate()).getDayOfMonth();
                 points.add(new KMeansUtil.Point(day, item.getAmount(), -1));
             } catch (Exception e) {}
         }
 
-        // 2. 执行算法 (假设聚为 3 类)
         KMeansUtil.ClusterResult result = KMeansUtil.fit(points, 3, 100);
-
         return Map.of("code", 200, "data", result);
     }
 
-    // 2. 新增：获取 AI 对聚类结果的分析报告
+    // 4. AI 对聚类结果的分析报告
     @GetMapping("/analyze-clustering")
     public Map<String, Object> analyzeClustering(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
         if (user == null) return Map.of("code", 401);
 
-        // A. 先重新计算一遍聚类 (为了获取中心点数据)
+        // A. 重新计算聚类以获取中心点
         List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
         List<KMeansUtil.Point> points = new ArrayList<>();
         for (InvoiceData item : list) {
             try {
-                int day = java.time.LocalDate.parse(item.getDate()).getDayOfMonth();
+                int day = LocalDate.parse(item.getDate()).getDayOfMonth();
                 points.add(new KMeansUtil.Point(day, item.getAmount(), -1));
             } catch (Exception e) {}
         }
 
         if (points.size() < 3) {
-            return Map.of("code", 200, "data", "数据量不足，暂无法生成聚类分析报告。请多上传几张票据。");
+            return Map.of("code", 200, "data", "数据量不足，暂无法生成分析报告。");
         }
 
         KMeansUtil.ClusterResult result = KMeansUtil.fit(points, 3, 50);
 
-        // B. 构建 Prompt，告诉 AI 三个群体的特征
+        // B. 构建 Prompt
         StringBuilder dataDesc = new StringBuilder();
         List<KMeansUtil.Point> centers = result.getCentroids();
 

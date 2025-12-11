@@ -18,12 +18,12 @@ public interface InvoiceRepository extends JpaRepository<InvoiceData, Long> {
     @Query("SELECT COALESCE(SUM(i.amount), 0) FROM InvoiceData i WHERE i.userId = :userId AND i.category = :category")
     Double sumAmountByUserIdAndCategory(Long userId, String category);
 
-    // 返回格式: List<Object[]> -> [ ["2025-01", 1200.00], ["2025-02", 1500.00] ... ]
+    // 修改后：ORDER BY month DESC LIMIT 12 (先取最新的12个月)
     @Query(value = "SELECT DATE_FORMAT(date, '%Y-%m') as month, SUM(amount) " +
             "FROM invoice_record " +
             "WHERE user_id = :userId " +
             "GROUP BY month " +
-            "ORDER BY month ASC " +
+            "ORDER BY month DESC " +
             "LIMIT 12", nativeQuery = true)
     List<Object[]> findMonthlyStatsByUserId(Long userId);
 }

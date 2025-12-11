@@ -16,7 +16,9 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -40,7 +42,6 @@ public class OcrService {
     }
 
     public InvoiceData processDocument(MultipartFile file) throws IOException {
-        // 1. PDF 转图片
         byte[] fileBytes;
         String fileName = file.getOriginalFilename();
         if (fileName != null && fileName.toLowerCase().endsWith(".pdf")) {
@@ -49,187 +50,234 @@ public class OcrService {
             fileBytes = file.getBytes();
         }
 
-        // 2. 调用智能财务票据识别
         return callSmartFinanceOcr(fileBytes);
     }
 
     /**
-     * 核心：调用百度[智能财务票据识别]接口
+     * 策略 A: 智能财务票据识别
+     * 注意：此接口参数必须为 HashMap<String, Object>
      */
     private InvoiceData callSmartFinanceOcr(byte[] imageBytes) {
         try {
+            // 🟢 这里的泛型是 <String, Object>
             HashMap<String, Object> options = new HashMap<>();
-            options.put("probability", "true"); // 返回置信度
+            options.put("probability", "true");
 
-            // API: multiple_invoice
             JSONObject res = client.multipleInvoice(imageBytes, options);
-
-            // 调试用：打印原始返回 (开发时可打开)
-            // System.out.println("🤖 OCR原始返回: " + res.toString());
 
             if (res.has("words_result")) {
                 JSONArray results = res.getJSONArray("words_result");
-                if (results.length() == 0) return null;
+                if (results.length() == 0) return callGeneralOcr(imageBytes);
 
-                // 目前系统设计为单张处理，所以我们取【第一个】识别到的票据
-                // 如果后续想做批量导入，可以在这里循环处理 results
                 JSONObject bestTicket = results.getJSONObject(0);
-                String type = bestTicket.optString("type", "");
-                JSONObject content = bestTicket.getJSONObject("result");
+                String type = bestTicket.optString("type", "unknown");
 
-                InvoiceData data = new InvoiceData();
-                data.setRawImageUrl("memory_image"); // 占位
-
-                // 根据票据类型进行不同的字段映射
-                switch (type) {
-                    case "vat_invoice": // 增值税发票
-                        parseVatInvoice(content, data);
-                        break;
-                    case "taxi_receipt": // 出租车票
-                        parseTaxiReceipt(content, data);
-                        break;
-                    case "train_ticket": // 火车票
-                        parseTrainTicket(content, data);
-                        break;
-                    case "quota_invoice": // 定额发票
-                        parseQuotaInvoice(content, data);
-                        break;
-                    case "air_ticket": // 飞机行程单
-                        parseAirTicket(content, data);
-                        break;
-                    default:
-                        // 其他类型兜底处理
-                        data.setMerchantName("未知票据类型: " + type);
+                if (!bestTicket.has("result")) {
+                    System.out.println("⚠️ 票据类型 [" + type + "] 不含详细结构，切换通用识别...");
+                    return callGeneralOcr(imageBytes);
                 }
 
-                // 统一后处理：日期格式化、分类补全
-                postProcess(data);
+                JSONObject content = bestTicket.getJSONObject("result");
+                InvoiceData data = new InvoiceData();
+                data.setRawImageUrl("memory_image");
 
+                switch (type) {
+                    case "vat_invoice":
+                        parseVatInvoice(content, data);
+                        break;
+                    case "train_ticket":
+                        parseTrainTicket(content, data);
+                        break;
+                    case "air_ticket":
+                        parseAirTicket(content, data);
+                        break;
+                    case "taxi_receipt":
+                        parseTaxiReceipt(content, data);
+                        break;
+                    case "quota_invoice":
+                        parseQuotaInvoice(content, data);
+                        break;
+                    case "taxi_online_ticket":
+                        parseTaxiOnline(content, data);
+                        break;
+                    default:
+                        data.setMerchantName("票据类型: " + type);
+                        data.setCategory("其他");
+                        data.setAmount(getDouble(content, "Amount", "TotalAmount", "total_fare", "fare", "money"));
+                        data.setDate(getValue(content, "Date", "date", "Time"));
+                }
+
+                postProcess(data);
                 return data;
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
-        return null;
+        return callGeneralOcr(imageBytes);
     }
 
-    // --- 1. 增值税发票解析 ---
-    private void parseVatInvoice(JSONObject r, InvoiceData data) {
-        data.setMerchantName(getValue(r, "SellerName"));
-        data.setAmount(getDouble(r, "AmountInFiguers", "TotalAmount")); // 优先取不含税，没有则取合计
-        data.setDate(getValue(r, "InvoiceDate"));
-        data.setInvoiceCode(getValue(r, "InvoiceNum")); // 优先存号码
-        if (data.getInvoiceCode() == null) data.setInvoiceCode(getValue(r, "InvoiceCode"));
+    /**
+     * 策略 B: 通用文字识别 (正则提取)
+     * 注意：此接口参数必须为 HashMap<String, String>，否则会报编译错误
+     */
+    private InvoiceData callGeneralOcr(byte[] imageBytes) {
+        InvoiceData data = new InvoiceData();
+        data.setMerchantName("未知商户(通用识别)");
+        data.setCategory("其他");
+        data.setItemName("扫描件");
 
-        // 项目名称：取第一行商品
-        String item = getValue(r, "CommodityName");
-        if (item == null) item = "办公用品/服务费";
-        data.setItemName(item);
+        try {
+            // 🔴 关键修复：这里的泛型必须改回 <String, String>
+            HashMap<String, String> options = new HashMap<>();
+            options.put("detect_direction", "true");
 
-        // 分类推断
-        String type = getValue(r, "InvoiceType");
-        if (type != null && type.contains("通行费")) data.setCategory("交通出行");
+            JSONObject res = client.basicAccurateGeneral(imageBytes, options);
+
+            if (res.has("words_result")) {
+                parseWordsToInvoice(res.getJSONArray("words_result"), data);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return data;
     }
 
-    // --- 2. 出租车票解析 ---
-    private void parseTaxiReceipt(JSONObject r, InvoiceData data) {
-        data.setCategory("交通出行");
-        data.setItemName("出租车费");
-        data.setMerchantName("出租车 " + getValue(r, "TaxiNum")); // 商户名存车牌号
-        data.setAmount(getDouble(r, "TotalFare", "Fare"));
-        data.setDate(getValue(r, "Date"));
-        data.setInvoiceCode(getValue(r, "InvoiceCode"));
-    }
+    // ================= 专用解析方法区 =================
 
-    // --- 3. 火车票解析 ---
     private void parseTrainTicket(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
         String trainNum = getValue(r, "train_num");
         String start = getValue(r, "starting_station");
         String end = getValue(r, "destination_station");
-        data.setItemName("火车票 " + (trainNum != null ? trainNum : "") + " " + start + "-" + end);
+
+        String itemName = "火车票";
+        if (trainNum != null) itemName += " " + trainNum;
+        if (start != null && end != null) itemName += " (" + start + "-" + end + ")";
+        data.setItemName(itemName);
+
         data.setMerchantName("铁路客运");
         data.setAmount(getDouble(r, "ticket_rates"));
         data.setDate(getValue(r, "date"));
         data.setInvoiceCode(getValue(r, "ticket_num"));
     }
 
-    // --- 4. 定额发票解析 ---
-    private void parseQuotaInvoice(JSONObject r, InvoiceData data) {
-        data.setCategory("餐饮美食"); // 定额发票多为餐饮，先默认
-        data.setAmount(getDouble(r, "invoice_rate", "invoice_rate_in_figure"));
-        data.setInvoiceCode(getValue(r, "invoice_number"));
-        data.setMerchantName("定额发票商户");
-        data.setItemName("定额消费");
-    }
-
-    // --- 5. 飞机票解析 ---
     private void parseAirTicket(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
-        data.setMerchantName(getValue(r, "carrier")); // 承运人，如中国国航
-        data.setAmount(getDouble(r, "ticket_rates")); // 合计金额
-        data.setDate(getValue(r, "date"));
+        String carrier = getValue(r, "carrier");
         String flight = getValue(r, "flight");
         String start = getValue(r, "starting_station");
         String end = getValue(r, "destination_station");
-        data.setItemName("机票 " + (flight!=null?flight:"") + " " + start + "-" + end);
+
+        data.setMerchantName(carrier != null ? carrier : "航空公司");
+
+        String itemName = "机票";
+        if (flight != null) itemName += " " + flight;
+        if (start != null && end != null) itemName += " (" + start + "-" + end + ")";
+        data.setItemName(itemName);
+
+        data.setAmount(getDouble(r, "ticket_rates", "fare", "TotalAmount"));
+        data.setDate(getValue(r, "date"));
+        data.setInvoiceCode(getValue(r, "ticket_number"));
     }
 
-    // --- 工具方法：提取百度API这种特定结构的字符串 ---
-    // 结构通常是: "Key": [{"word": "实际值", ...}]
-    private String getValue(JSONObject obj, String key) {
-        if (obj == null || !obj.has(key)) return null;
-        JSONArray arr = obj.getJSONArray(key);
-        if (arr.length() > 0) {
-            return arr.getJSONObject(0).optString("word", null);
+    private void parseTaxiReceipt(JSONObject r, InvoiceData data) {
+        data.setCategory("交通出行");
+        data.setItemName("出租车费");
+        data.setMerchantName("出租车 " + getValue(r, "TaxiNum"));
+        data.setAmount(getDouble(r, "TotalFare", "Fare"));
+        data.setDate(getValue(r, "Date"));
+        data.setInvoiceCode(getValue(r, "InvoiceCode"));
+    }
+
+    private void parseTaxiOnline(JSONObject r, InvoiceData data) {
+        data.setCategory("交通出行");
+        String provider = getValue(r, "service_provider");
+        data.setMerchantName(provider != null ? provider : "网约车");
+        data.setItemName("网约车行程");
+        data.setAmount(getDouble(r, "total_fare"));
+        data.setDate(getValue(r, "application_date"));
+    }
+
+    private void parseVatInvoice(JSONObject r, InvoiceData data) {
+        data.setMerchantName(getValue(r, "SellerName"));
+        data.setAmount(getDouble(r, "TotalAmount", "AmountInFiguers"));
+        data.setDate(getValue(r, "InvoiceDate"));
+        data.setInvoiceCode(getValue(r, "InvoiceNum"));
+        if (data.getInvoiceCode() == null) data.setInvoiceCode(getValue(r, "InvoiceCode"));
+        String item = getValue(r, "CommodityName");
+        data.setItemName(item != null ? item : "办公用品/服务费");
+    }
+
+    private void parseQuotaInvoice(JSONObject r, InvoiceData data) {
+        data.setCategory("餐饮美食");
+        data.setAmount(getDouble(r, "invoice_rate", "invoice_rate_in_figure"));
+        data.setInvoiceCode(getValue(r, "invoice_number"));
+        data.setMerchantName("定额发票");
+        data.setItemName("定额消费");
+    }
+
+    // --- 通用正则解析 ---
+    private void parseWordsToInvoice(JSONArray words, InvoiceData data) {
+        List<String> lines = new ArrayList<>();
+        for (int i = 0; i < words.length(); i++) {
+            lines.add(words.getJSONObject(i).getString("words"));
+        }
+        double maxAmount = 0.0;
+        for (String line : lines) {
+            Matcher m = Pattern.compile("(\\d{1,3}(,\\d{3})*\\.\\d{2})").matcher(line);
+            while (m.find()) {
+                try {
+                    double v = Double.parseDouble(m.group(1).replace(",", ""));
+                    if (v > maxAmount && v < 1000000) maxAmount = v;
+                } catch (Exception e) {}
+            }
+        }
+        if (maxAmount > 0) data.setAmount(maxAmount);
+        for (String line : lines) {
+            Matcher m = Pattern.compile("202\\d[-年/.]\\d{1,2}[-月/.]\\d{1,2}").matcher(line);
+            if (m.find()) {
+                data.setDate(m.group().replaceAll("[年月/.]", "-"));
+                break;
+            }
+        }
+        String fullText = String.join(" ", lines);
+        if (fullText.contains("餐饮") || fullText.contains("饭")) data.setCategory("餐饮美食");
+        else if (fullText.contains("车") || fullText.contains("交通")) data.setCategory("交通出行");
+    }
+
+    // ================= 工具方法 =================
+
+    private String getValue(JSONObject obj, String... possibleKeys) {
+        for (String key : possibleKeys) {
+            if (obj.has(key)) {
+                JSONArray arr = obj.getJSONArray(key);
+                if (arr.length() > 0) {
+                    return arr.getJSONObject(0).optString("word", null);
+                }
+            }
         }
         return null;
     }
 
-    // 工具方法：提取金额 (支持多个备选字段)
     private Double getDouble(JSONObject obj, String... keys) {
-        for (String key : keys) {
-            String val = getValue(obj, key);
-            if (val != null) {
-                try {
-                    // 去掉 "￥", "元" 等非数字字符
-                    String numStr = val.replaceAll("[^0-9.]", "");
-                    return Double.parseDouble(numStr);
-                } catch (Exception e) {}
-            }
+        String val = getValue(obj, keys);
+        if (val != null) {
+            try {
+                String numStr = val.replaceAll("[^0-9.]", "");
+                return Double.parseDouble(numStr);
+            } catch (Exception e) {}
         }
         return 0.0;
     }
 
-    // --- 后处理：清洗数据 ---
     private void postProcess(InvoiceData data) {
-        // 1. 规范化日期格式 -> YYYY-MM-DD
         if (data.getDate() != null) {
-            String d = data.getDate();
-            // 处理 "2025年05月20日" -> "2025-05-20"
-            d = d.replaceAll("[年月/.]", "-").replace("日", "");
-            // 简单的正则提取 YYYY-MM-DD
+            String d = data.getDate().replaceAll("[年月/.]", "-").replace("日", "");
             Matcher m = Pattern.compile("\\d{4}-\\d{1,2}-\\d{1,2}").matcher(d);
-            if (m.find()) {
-                data.setDate(m.group());
-            }
+            if (m.find()) data.setDate(m.group());
         }
-
-        // 2. 智能分类补全 (如果前面没定好分类)
-        if (data.getCategory() == null || data.getCategory().equals("其他")) {
-            String fullText = (data.getItemName() + data.getMerchantName()).toLowerCase();
-            if (fullText.contains("餐饮") || fullText.contains("美食") || fullText.contains("星巴克"))
-                data.setCategory("餐饮美食");
-            else if (fullText.contains("交通") || fullText.contains("车") || fullText.contains("航") || fullText.contains("油"))
-                data.setCategory("交通出行");
-            else if (fullText.contains("办公") || fullText.contains("纸") || fullText.contains("笔"))
-                data.setCategory("办公耗材");
-            else if (fullText.contains("通信") || fullText.contains("网") || fullText.contains("信"))
-                data.setCategory("通讯网络");
-            else if (fullText.contains("电子") || fullText.contains("电脑") || fullText.contains("手机"))
-                data.setCategory("电子设备");
-            else
-                data.setCategory("其他");
+        if (data.getCategory() == null) {
+            data.setCategory("其他");
         }
     }
 
