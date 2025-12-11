@@ -50,7 +50,9 @@ public class AnomalyDetectionUtil {
             DenseInstance instance = new DenseInstance(3);
             instance.setValue(attributes.get(0), invoice.getAmount());
             instance.setValue(attributes.get(1), invoice.getCategory());
-            instance.setValue(attributes.get(2), String.valueOf(invoice.getIsAnomaly())); // 目标值
+            // [修复] 将 0/1 转换为模型定义的 "false"/"true"
+            String anomalyLabel = invoice.getIsAnomaly() == 1 ? "true" : "false";
+            instance.setValue(attributes.get(2), anomalyLabel); // 目标值
             trainingData.add(instance);
         }
 
@@ -91,7 +93,7 @@ public class AnomalyDetectionUtil {
             // 3. 使用模型进行预测
             double predictionIndex = mlp.classifyInstance(testSet.firstInstance()); // 返回预测值的索引 (0.0 for 'false', 1.0 for 'true')
 
-            System.out.println("🤖 [Weka NN] Prediction for invoice #" + newInvoice.getId() + ": " + testSet.classAttribute().value((int) predictionIndex));
+            System.out.println("🤖 [Weka NN] Prediction for new invoice: " + testSet.classAttribute().value((int) predictionIndex));
 
             // 4. 返回预测结果
             return predictionIndex == 1.0;
