@@ -20,6 +20,7 @@ SmartDoc 是一个基于 **AI 视觉技术** 的智能票据管理系统。旨�
 - 🔐 **多用户数据隔离**: 完善的用户鉴权系统(基于 Session/Interceptor 机制),确保每个用户只能管理自己的财务数据
 - 💾 **数据持久化存储**: 基于 MySQL + JPA 实现票据数据的增删改查,支持历史记录查询
 - 🔄 **完整的 CRUD 操作**: 支持票据的新增、查询、修改和删除,提供完善的数据管理能力
+- 📊 **数据可视化**: 支持 ECharts 数据统计看板,展示支出趋势和分类占比
 
 ---
 
@@ -27,6 +28,15 @@ SmartDoc 是一个基于 **AI 视觉技术** 的智能票据管理系统。旨�
 
 ### 前端 (Frontend)
 https://github.com/IIICJXXIII/smart_doc_frontend
+
+| 技术 | 版本 | 说明 |
+|-----|------|-----|
+| **核心框架** | Vue 3.5.25 | Composition API |
+| **开发语言** | TypeScript 5.9 | 类型安全 |
+| **构建工具** | Vite 7.2 | 下一代前端构建工具 |
+| **UI 组件库** | Element Plus 2.12 | Vue 3 组件库 |
+| **状态管理** | Pinia 3.0 | Vue 3 官方状态管理 |
+| **图表库** | ECharts 6.0 | 数据可视化 |
 
 ### 后端 (Backend)
 
@@ -38,6 +48,7 @@ https://github.com/IIICJXXIII/smart_doc_frontend
 | **数据库** | MySQL 8.0 | 关系型数据库 |
 | **AI SDK** | Baidu AIP SDK 4.16.19 | 百度 AI 开放平台 SDK |
 | **PDF 处理** | Apache PDFBox 2.0.27 | PDF 转图片处理 |
+| **Excel 导出** | Apache POI 5.2.3 | Excel 文件处理 |
 | **工具库** | Hutool 5.8.16 | 工具类库 |
 | **简化代码** | Lombok | 注解简化 Java Bean |
 
@@ -290,8 +301,8 @@ public List<InvoiceData> getList() {
 - [x] 用户注册与登录系统
 - [x] 数据持久化与多租户隔离
 - [x] 票据的增删改查功能
-- [ ] 前端界面开发 (Vue 3 + Element Plus)
-- [ ] ECharts 数据可视化看板
+- [x] 前端界面开发 (Vue 3 + Element Plus)
+- [x] ECharts 数据可视化看板
 - [ ] 导出 Excel 报表功能
 - [ ] 多文件批量上传支持
 - [ ] 票据图片云存储(OSS)
@@ -339,11 +350,12 @@ public List<InvoiceData> getList() {
 
 ## 🎯 项目亮点
 
-1. **完整的前后端分离架构** - 适合作为 Spring Boot 入门项目
+1. **完整的前后端分离架构** - 适合作为 Spring Boot + Vue 3 入门项目
 2. **AI 技术实战应用** - 集成百度 OCR,体验人工智能在实际业务中的应用
 3. **规范的代码结构** - 遵循 MVC 三层架构,代码清晰易读
 4. **多用户系统设计** - 实现了基础的用户鉴权和数据隔离
 5. **详细的注释文档** - 核心代码均有详细注释,便于理解学习
+6. **数据可视化** - ECharts 图表展示财务统计数据
 
 ---
 
