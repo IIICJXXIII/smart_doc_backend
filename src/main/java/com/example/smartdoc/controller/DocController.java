@@ -51,41 +51,16 @@ public class DocController {
 
         data.setUserId(currentUser.getId());
 
-        // --- 🔥 核心升级：触发异常检测算法 ---
-        try {
-            // 1. 取出该用户、该分类下的所有历史金额 (作为训练数据)
-            List<InvoiceData> historyList = invoiceRepository.findByUserIdAndCategoryOrderByIdDesc(
-                    currentUser.getId(),
-                    data.getCategory() // 只跟同类别的比，比如餐饮只跟餐饮比
-            );
+        // --- 🔥 核心升级：调用基于神经网络的异常检测算法 ---
+        // 1. 获取该用户的所有历史票据作为训练数据
+        List<InvoiceData> allInvoices = invoiceRepository.findByUserIdOrderByIdDesc(currentUser.getId());
 
-            // 提取金额列表
-            List<Double> historyAmounts = historyList.stream()
-                    .map(InvoiceData::getAmount)
-                    .toList(); // JDK 16+ 写法，如果是旧版用 .collect(Collectors.toList())
+        // 2. 调用新的工具类进行预测
+        boolean isWeird = AnomalyDetectionUtil.isAnomaly(data, allInvoices);
 
-            // 只有历史数据足够多(比如大于5条)才开始检测，否则样本太少不准
-            if (historyAmounts.size() >= 5) {
-                double mean = AnomalyDetectionUtil.calculateMean(historyAmounts);
-                double stdDev = AnomalyDetectionUtil.calculateStdDev(historyAmounts, mean);
-
-                // 2. 算法判定
-                boolean isWeird = AnomalyDetectionUtil.isAnomaly(data.getAmount(), mean, stdDev);
-
-                // 3. 打标
-                data.setIsAnomaly(isWeird ? 1 : 0);
-
-                if (isWeird) {
-                    System.out.println("⚠️ 发现异常消费！金额: " + data.getAmount() + ", 均值: " + mean);
-                }
-            } else {
-                data.setIsAnomaly(0); // 样本不足默认正常
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            data.setIsAnomaly(0); // 算法出错兜底为正常
-        }
-        // ---------------------------------------
+        // 3. 设置异常标签
+        data.setIsAnomaly(isWeird ? 1 : 0);
+        // ----------------------------------------------------
 
         invoiceRepository.save(data);
         return "success";
@@ -176,4 +151,181 @@ public class DocController {
             e.printStackTrace();
         }
     }
+}
+        return "success";
+
+    }
+
+
+
+    // 3. 获取列表 (Read) - 只查自己的数据
+
+    @GetMapping("/list")
+
+    public List<InvoiceData> getList() {
+
+        // A. 获取当前登录用户
+
+        User currentUser = getCurrentUser();
+
+        if (currentUser == null) {
+
+            return List.of(); // 未登录返回空列表
+
+        }
+
+
+
+        // B. 调用 Repository 新写的方法，只查这个人的
+
+        return invoiceRepository.findByUserIdOrderByIdDesc(currentUser.getId());
+
+    }
+
+
+
+    // 4. 删除 (Delete) - 安全校验
+
+    @DeleteMapping("/delete/{id}")
+
+    public String deleteDoc(@PathVariable Long id) {
+
+        User currentUser = getCurrentUser();
+
+
+
+        // 查一下这条数据是不是存在的
+
+        InvoiceData data = invoiceRepository.findById(id).orElse(null);
+
+
+
+        // 只有数据存在，且属于当前用户，才允许删除
+
+        if (data != null && data.getUserId().equals(currentUser.getId())) {
+
+            invoiceRepository.deleteById(id);
+
+            return "success";
+
+        } else {
+
+            return "fail: permission denied"; // 没权限删别人的
+
+        }
+
+    }
+
+
+
+    /**
+
+     * 辅助方法：从 Header 的 Token 中获取当前用户对象
+
+     */
+
+    private User getCurrentUser() {
+
+        String token = request.getHeader("Authorization");
+
+        if (token != null && UserController.tokenMap.containsKey(token)) {
+
+            return UserController.tokenMap.get(token);
+
+        }
+
+        return null; // Token 无效或未登录
+
+    }
+
+
+
+    // 新增：导出 Excel 接口
+
+    @GetMapping("/export")
+
+    public void export(HttpServletResponse response, @RequestHeader("Authorization") String token) {
+
+        try {
+
+            User user = UserController.tokenMap.get(token);
+
+            if (user == null) return;
+
+
+
+            // 1. 查询该用户所有数据
+
+            List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
+
+
+
+            // 2. 使用 Hutool 创建 Excel Writer
+
+            ExcelWriter writer = ExcelUtil.getWriter(true);
+
+
+
+            // 3. 自定义标题别名 (否则导出的表头是英文列名)
+
+            writer.addHeaderAlias("id", "编号");
+
+            writer.addHeaderAlias("merchantName", "商户名称");
+
+            writer.addHeaderAlias("itemName", "项目名称");
+
+            writer.addHeaderAlias("amount", "金额");
+
+            writer.addHeaderAlias("date", "开票日期");
+
+            writer.addHeaderAlias("category", "分类");
+
+            writer.addHeaderAlias("invoiceCode", "发票号码");
+
+            writer.addHeaderAlias("createTime", "创建时间");
+
+
+
+            // 默认只导出这些列，忽略 userId 等内部字段
+
+            writer.setOnlyAlias(true);
+
+
+
+            // 4. 写出数据
+
+            writer.write(list, true);
+
+
+
+            // 5. 设置浏览器响应格式 (弹出下载框)
+
+            response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=utf-8");
+
+            String fileName = URLEncoder.encode("发票归档报表", StandardCharsets.UTF_8);
+
+            response.setHeader("Content-Disposition", "attachment;filename=" + fileName + ".xlsx");
+
+
+
+            // 6. 写出流
+
+            ServletOutputStream out = response.getOutputStream();
+
+            writer.flush(out, true);
+
+            writer.close();
+
+            out.close();
+
+
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+        }
+
+    }
+
 }
