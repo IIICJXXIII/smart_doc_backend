@@ -18,6 +18,11 @@ import java.nio.charset.StandardCharsets;
 
 import java.util.List;
 
+/**
+ * 此时票据管理核心控制器
+ * 负责发票的上传识别、保存归档、查询列表、导出 Excel 以及删除功能
+ * 集成了 OCR 服务和异常检测算法
+ */
 @RestController
 @RequestMapping("/api/doc")
 @CrossOrigin(origins = "*")
@@ -32,6 +37,13 @@ public class DocController {
     @Autowired
     private HttpServletRequest request; // 注入 request 以获取 Header
 
+    /**
+     * 上传发票图片或PDF进行 OCR 识别
+     * 不会将数据存入数据库，仅返回识别结果供前端确认
+     *
+     * @param file 上传的文件
+     * @return 识别出的发票结构化数据
+     */
     // 1. 上传识别 (不需要改，识别不涉及存库)
     @PostMapping("/upload")
     public InvoiceData uploadAndAnalyze(@RequestParam("file") MultipartFile file) {
@@ -43,11 +55,19 @@ public class DocController {
         }
     }
 
+    /**
+     * 保存发票数据到数据库
+     * 会自动触发金额异常检测算法，标记疑似异常消费
+     *
+     * @param data 从前端确认并提交的发票数据
+     * @return 操作结果
+     */
     // 2. 保存归档 (Create) - 绑定当前用户
     @PostMapping("/save")
     public String saveDoc(@RequestBody InvoiceData data) {
         User currentUser = getCurrentUser();
-        if (currentUser == null) return "error: not login";
+        if (currentUser == null)
+            return "error: not login";
 
         data.setUserId(currentUser.getId());
 
@@ -91,6 +111,12 @@ public class DocController {
         return "success";
     }
 
+    /**
+     * 获取当前用户的发票列表
+     * 按ID倒序排列
+     *
+     * @return 发票列表
+     */
     // 3. 获取列表 (Read) - 只查自己的数据
     @GetMapping("/list")
     public List<InvoiceData> getList() {
@@ -104,6 +130,13 @@ public class DocController {
         return invoiceRepository.findByUserIdOrderByIdDesc(currentUser.getId());
     }
 
+    /**
+     * 删除指定发票记录
+     * 只有记录属于当前用户时才允许删除
+     *
+     * @param id 发票ID
+     * @return 操作结果
+     */
     // 4. 删除 (Delete) - 安全校验
     @DeleteMapping("/delete/{id}")
     public String deleteDoc(@PathVariable Long id) {
@@ -132,12 +165,19 @@ public class DocController {
         return null; // Token 无效或未登录
     }
 
+    /**
+     * 导出用户发票数据为 Excel 文件
+     *
+     * @param response HTTP 响应对象，用于写入文件流
+     * @param token    用户认证令牌
+     */
     // 新增：导出 Excel 接口
     @GetMapping("/export")
     public void export(HttpServletResponse response, @RequestHeader("Authorization") String token) {
         try {
             User user = UserController.tokenMap.get(token);
-            if (user == null) return;
+            if (user == null)
+                return;
 
             // 1. 查询该用户所有数据
             List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());

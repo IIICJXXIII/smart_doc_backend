@@ -16,30 +16,53 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 系统管理控制器
+ * 处理操作日志查询、数据备份（导出JSON）和数据恢复（导入JSON）
+ */
 @RestController
 @RequestMapping("/api/system")
 @CrossOrigin(origins = "*")
 public class SystemController {
 
-    @Autowired private InvoiceRepository invoiceRepo;
-    @Autowired private BudgetRepository budgetRepo;
-    @Autowired private ChatLogRepository chatLogRepo;
-    @Autowired private OperationLogRepository opLogRepo;
+    @Autowired
+    private InvoiceRepository invoiceRepo;
+    @Autowired
+    private BudgetRepository budgetRepo;
+    @Autowired
+    private ChatLogRepository chatLogRepo;
+    @Autowired
+    private OperationLogRepository opLogRepo;
 
+    /**
+     * 获取当前用户的操作日志
+     *
+     * @param token 用户认证令牌
+     * @return 操作日志列表
+     */
     // 1. 获取操作日志
     @GetMapping("/logs")
     public Map<String, Object> getLogs(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
-        if (user == null) return Map.of("code", 401);
+        if (user == null)
+            return Map.of("code", 401);
         return Map.of("code", 200, "data", opLogRepo.findByUserIdOrderByIdDesc(user.getId()));
     }
 
+    /**
+     * 数据备份
+     * 导出当前用户的所有发票、预算和聊天记录为 JSON 文件
+     *
+     * @param response HTTP 响应对象
+     * @param token    用户认证令牌
+     */
     // 2. 数据备份 (下载 JSON)
     @GetMapping("/backup")
     public void backup(HttpServletResponse response, @RequestHeader("Authorization") String token) {
         try {
             User user = UserController.tokenMap.get(token);
-            if (user == null) return;
+            if (user == null)
+                return;
 
             // 封装所有数据
             Map<String, Object> backupData = new HashMap<>();
@@ -54,7 +77,8 @@ public class SystemController {
 
             // 输出文件
             response.setContentType("application/json;charset=utf-8");
-            String fileName = URLEncoder.encode("SmartDoc_Backup_" + System.currentTimeMillis(), StandardCharsets.UTF_8);
+            String fileName = URLEncoder.encode("SmartDoc_Backup_" + System.currentTimeMillis(),
+                    StandardCharsets.UTF_8);
             response.setHeader("Content-Disposition", "attachment;filename=" + fileName + ".json");
 
             String jsonStr = JSONUtil.toJsonPrettyStr(backupData);
@@ -65,12 +89,22 @@ public class SystemController {
         }
     }
 
+    /**
+     * 数据恢复
+     * 接收 JSON 备份文件，还原用户的发票和预算数据
+     *
+     * @param file  备份文件
+     * @param token 用户认证令牌
+     * @return 恢复结果
+     */
     // 3. 数据恢复 (上传 JSON)
     @PostMapping("/restore")
     @Transactional // 事务：要么全成功，要么全失败
-    public Map<String, Object> restore(@RequestParam("file") MultipartFile file, @RequestHeader("Authorization") String token) {
+    public Map<String, Object> restore(@RequestParam("file") MultipartFile file,
+            @RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
-        if (user == null) return Map.of("code", 401);
+        if (user == null)
+            return Map.of("code", 401);
 
         try {
             String jsonStr = new String(file.getBytes(), StandardCharsets.UTF_8);

@@ -22,6 +22,11 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * OCR 识别服务
+ * 封装百度 AI 平台的 OCR 接口，支持多种票据类型的识别
+ * 包含策略分发：优先使用混贴票据识别，失败则降级为通用文字识别
+ */
 @Service
 public class OcrService {
 
@@ -41,6 +46,14 @@ public class OcrService {
         client.setSocketTimeoutInMillis(60000);
     }
 
+    /**
+     * 处理上传的文件进行 OCR 识别
+     * 如果是 PDF 文件，会自动转换为图片后再识别
+     *
+     * @param file 上传的文件对象
+     * @return 识别后的结构化发票数据
+     * @throws IOException IO异常
+     */
     public InvoiceData processDocument(MultipartFile file) throws IOException {
         byte[] fileBytes;
         String fileName = file.getOriginalFilename();
@@ -54,8 +67,11 @@ public class OcrService {
     }
 
     /**
-     * 策略 A: 智能财务票据识别
-     * 注意：此接口参数必须为 HashMap<String, Object>
+     * 策略 A: 智能财务票据识别 (优先)
+     * 调用百度 "Multiple Invoice" 接口，支持混贴票据切分和识别
+     *
+     * @param imageBytes 图片二进制数据
+     * @return 识别结果
      */
     private InvoiceData callSmartFinanceOcr(byte[] imageBytes) {
         try {
@@ -67,7 +83,8 @@ public class OcrService {
 
             if (res.has("words_result")) {
                 JSONArray results = res.getJSONArray("words_result");
-                if (results.length() == 0) return callGeneralOcr(imageBytes);
+                if (results.length() == 0)
+                    return callGeneralOcr(imageBytes);
 
                 JSONObject bestTicket = results.getJSONObject(0);
                 String type = bestTicket.optString("type", "unknown");
@@ -117,8 +134,11 @@ public class OcrService {
     }
 
     /**
-     * 策略 B: 通用文字识别 (正则提取)
-     * 注意：此接口参数必须为 HashMap<String, String>，否则会报编译错误
+     * 策略 B: 通用文字识别 (降级方案)
+     * 当票据识别失败或无法分类时，使用通用 OCR 提取文字，再通过正则提取金额和日期
+     *
+     * @param imageBytes 图片二进制数据
+     * @return 识别结果（仅包含基础信息）
      */
     private InvoiceData callGeneralOcr(byte[] imageBytes) {
         InvoiceData data = new InvoiceData();
@@ -142,7 +162,7 @@ public class OcrService {
         return data;
     }
 
-    // ================= 专用解析方法区 =================
+    // ================= 专用解析方法区 (针对不同票据类型的字段映射) =================
 
     private void parseTrainTicket(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
@@ -151,8 +171,10 @@ public class OcrService {
         String end = getValue(r, "destination_station");
 
         String itemName = "火车票";
-        if (trainNum != null) itemName += " " + trainNum;
-        if (start != null && end != null) itemName += " (" + start + "-" + end + ")";
+        if (trainNum != null)
+            itemName += " " + trainNum;
+        if (start != null && end != null)
+            itemName += " (" + start + "-" + end + ")";
         data.setItemName(itemName);
 
         data.setMerchantName("铁路客运");
@@ -171,8 +193,10 @@ public class OcrService {
         data.setMerchantName(carrier != null ? carrier : "航空公司");
 
         String itemName = "机票";
-        if (flight != null) itemName += " " + flight;
-        if (start != null && end != null) itemName += " (" + start + "-" + end + ")";
+        if (flight != null)
+            itemName += " " + flight;
+        if (start != null && end != null)
+            itemName += " (" + start + "-" + end + ")";
         data.setItemName(itemName);
 
         data.setAmount(getDouble(r, "ticket_rates", "fare", "TotalAmount"));
@@ -203,7 +227,8 @@ public class OcrService {
         data.setAmount(getDouble(r, "TotalAmount", "AmountInFiguers"));
         data.setDate(getValue(r, "InvoiceDate"));
         data.setInvoiceCode(getValue(r, "InvoiceNum"));
-        if (data.getInvoiceCode() == null) data.setInvoiceCode(getValue(r, "InvoiceCode"));
+        if (data.getInvoiceCode() == null)
+            data.setInvoiceCode(getValue(r, "InvoiceCode"));
         String item = getValue(r, "CommodityName");
         data.setItemName(item != null ? item : "办公用品/服务费");
     }
@@ -216,6 +241,13 @@ public class OcrService {
         data.setItemName("定额消费");
     }
 
+    /**
+     * 通用正则解析
+     * 在杂乱的 OCR 文字结果中，尝试提取金额 (0.00格式) 和 日期 (YYYY-MM-DD)
+     *
+     * @param words OCR 返回的文字块列表
+     * @param data  目标数据对象
+     */
     // --- 通用正则解析 ---
     private void parseWordsToInvoice(JSONArray words, InvoiceData data) {
         List<String> lines = new ArrayList<>();
@@ -228,11 +260,14 @@ public class OcrService {
             while (m.find()) {
                 try {
                     double v = Double.parseDouble(m.group(1).replace(",", ""));
-                    if (v > maxAmount && v < 1000000) maxAmount = v;
-                } catch (Exception e) {}
+                    if (v > maxAmount && v < 1000000)
+                        maxAmount = v;
+                } catch (Exception e) {
+                }
             }
         }
-        if (maxAmount > 0) data.setAmount(maxAmount);
+        if (maxAmount > 0)
+            data.setAmount(maxAmount);
         for (String line : lines) {
             Matcher m = Pattern.compile("202\\d[-年/.]\\d{1,2}[-月/.]\\d{1,2}").matcher(line);
             if (m.find()) {
@@ -241,8 +276,10 @@ public class OcrService {
             }
         }
         String fullText = String.join(" ", lines);
-        if (fullText.contains("餐饮") || fullText.contains("饭")) data.setCategory("餐饮美食");
-        else if (fullText.contains("车") || fullText.contains("交通")) data.setCategory("交通出行");
+        if (fullText.contains("餐饮") || fullText.contains("饭"))
+            data.setCategory("餐饮美食");
+        else if (fullText.contains("车") || fullText.contains("交通"))
+            data.setCategory("交通出行");
     }
 
     // ================= 工具方法 =================
@@ -265,7 +302,8 @@ public class OcrService {
             try {
                 String numStr = val.replaceAll("[^0-9.]", "");
                 return Double.parseDouble(numStr);
-            } catch (Exception e) {}
+            } catch (Exception e) {
+            }
         }
         return 0.0;
     }
@@ -274,16 +312,24 @@ public class OcrService {
         if (data.getDate() != null) {
             String d = data.getDate().replaceAll("[年月/.]", "-").replace("日", "");
             Matcher m = Pattern.compile("\\d{4}-\\d{1,2}-\\d{1,2}").matcher(d);
-            if (m.find()) data.setDate(m.group());
+            if (m.find())
+                data.setDate(m.group());
         }
         if (data.getCategory() == null) {
             data.setCategory("其他");
         }
     }
 
+    /**
+     * 将 PDF 文件的第一页转换为 JPG 图片字节数组
+     *
+     * @param pdfBytes PDF 文件内容
+     * @return JPG 图片内容
+     * @throws IOException 转换异常
+     */
     private byte[] convertPdfToJpg(byte[] pdfBytes) throws IOException {
         try (PDDocument document = PDDocument.load(pdfBytes);
-             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             PDFRenderer renderer = new PDFRenderer(document);
             BufferedImage image = renderer.renderImage(0, 2.0f, ImageType.RGB);
             ImageIO.write(image, "jpg", baos);

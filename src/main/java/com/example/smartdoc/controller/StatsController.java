@@ -18,6 +18,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 统计分析控制器
+ * 提供数据可视化、趋势预测、知识图谱和聚类分析等高级功能
+ */
 @RestController
 @RequestMapping("/api/stats")
 @CrossOrigin(origins = "*")
@@ -29,11 +33,19 @@ public class StatsController {
     @Autowired
     private DeepSeekService deepSeekService;
 
+    /**
+     * 获取消费趋势预测
+     * 基于最近12个月的数据，使用线性回归算法预测下个月的支出
+     *
+     * @param token 用户认证令牌
+     * @return 包含月度数据和预测结果的 Map
+     */
     // 1. 获取趋势预测 (修复了年份排序问题)
     @GetMapping("/trend")
     public Map<String, Object> getTrendPrediction(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
-        if (user == null) return Map.of("code", 401);
+        if (user == null)
+            return Map.of("code", 401);
 
         // 1. 获取数据 (现在取到的是最新的12条，但是是倒序的: 2025-12, 2025-11...)
         // 注意：这里需要在 InvoiceRepository 中把 SQL 改为 ORDER BY month DESC
@@ -79,11 +91,19 @@ public class StatsController {
         return Map.of("code", 200, "data", data);
     }
 
+    /**
+     * 获取知识图谱数据
+     * 构建 用户 -> 分类 -> 商户 的关系图谱，用于 ECharts 关系图展示
+     *
+     * @param token 用户认证令牌
+     * @return 节点(nodes)和边(links)的数据
+     */
     // 2. 获取知识图谱数据
     @GetMapping("/graph")
     public Map<String, Object> getKnowledgeGraph(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
-        if (user == null) return Map.of("code", 401);
+        if (user == null)
+            return Map.of("code", 401);
 
         List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
 
@@ -154,11 +174,19 @@ public class StatsController {
         return Map.of("code", 200, "data", result);
     }
 
+    /**
+     * 获取消费聚类分析
+     * 使用 K-Means 算法对消费时间(日)和金额进行聚类，识别消费习惯
+     *
+     * @param token 用户认证令牌
+     * @return 聚类结果（包含中心点和各点所属类别）
+     */
     // 3. K-Means 聚类分析
     @GetMapping("/clustering")
     public Map<String, Object> getClustering(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
-        if (user == null) return Map.of("code", 401);
+        if (user == null)
+            return Map.of("code", 401);
 
         List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
         List<KMeansUtil.Point> points = new ArrayList<>();
@@ -167,18 +195,27 @@ public class StatsController {
             try {
                 int day = LocalDate.parse(item.getDate()).getDayOfMonth();
                 points.add(new KMeansUtil.Point(day, item.getAmount(), -1));
-            } catch (Exception e) {}
+            } catch (Exception e) {
+            }
         }
 
         KMeansUtil.ClusterResult result = KMeansUtil.fit(points, 3, 100);
         return Map.of("code", 200, "data", result);
     }
 
+    /**
+     * AI 智能分析聚类结果
+     * 将聚类中心数据发送给 AI，让其生成通俗易懂的理财建议报告
+     *
+     * @param token 用户认证令牌
+     * @return AI 生成的分析文本
+     */
     // 4. AI 对聚类结果的分析报告
     @GetMapping("/analyze-clustering")
     public Map<String, Object> analyzeClustering(@RequestHeader("Authorization") String token) {
         User user = UserController.tokenMap.get(token);
-        if (user == null) return Map.of("code", 401);
+        if (user == null)
+            return Map.of("code", 401);
 
         // A. 重新计算聚类以获取中心点
         List<InvoiceData> list = invoiceRepository.findByUserIdOrderByIdDesc(user.getId());
@@ -187,7 +224,8 @@ public class StatsController {
             try {
                 int day = LocalDate.parse(item.getDate()).getDayOfMonth();
                 points.add(new KMeansUtil.Point(day, item.getAmount(), -1));
-            } catch (Exception e) {}
+            } catch (Exception e) {
+            }
         }
 
         if (points.size() < 3) {
@@ -203,22 +241,22 @@ public class StatsController {
         for (int i = 0; i < centers.size(); i++) {
             KMeansUtil.Point p = centers.get(i);
             dataDesc.append(String.format("- 群体%d特征: 平均发生在每月 %d 号左右，平均金额约 %.2f 元。\n",
-                    i + 1, (int)p.getX(), p.getY()));
+                    i + 1, (int) p.getX(), p.getY()));
         }
 
         String systemPrompt = "你是一个专业的财务数据分析师。请根据用户的消费聚类中心数据，用通俗易懂的语言分析用户的消费习惯。";
         String userPrompt = String.format("""
-            我的消费数据被 K-Means 算法聚类为以下 3 类：
-            %s
-            
-            请帮我分析：
-            1. 哪一类可能是日常餐饮/交通？
-            2. 哪一类可能是房租/房贷或固定大额支出？
-            3. 哪一类可能是突发性消费？
-            4. 给出一句简短的理财建议。
-            
-            请直接给出分析结果，不要啰嗦，使用 Markdown 格式。
-            """, dataDesc.toString());
+                我的消费数据被 K-Means 算法聚类为以下 3 类：
+                %s
+
+                请帮我分析：
+                1. 哪一类可能是日常餐饮/交通？
+                2. 哪一类可能是房租/房贷或固定大额支出？
+                3. 哪一类可能是突发性消费？
+                4. 给出一句简短的理财建议。
+
+                请直接给出分析结果，不要啰嗦，使用 Markdown 格式。
+                """, dataDesc.toString());
 
         // C. 调用 AI
         String analysis = deepSeekService.callAi(systemPrompt, userPrompt);

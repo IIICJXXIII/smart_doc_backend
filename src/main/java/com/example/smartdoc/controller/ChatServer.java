@@ -20,6 +20,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArraySet;
 
+/**
+ * 智能客服 WebSocket 服务端
+ * 处理用户与 AI 的实时对话，包含 SQL 生成、执行和数据总结功能
+ */
 @ServerEndpoint("/ws/chat/{token}")
 @Component
 public class ChatServer {
@@ -56,6 +60,13 @@ public class ChatServer {
         }
     }
 
+    /**
+     * WebSocket 连接建立回调
+     * 验证 Token 并记录当前连接的用户
+     *
+     * @param session WebSocket 会话
+     * @param token   用户认证令牌
+     */
     @OnOpen
     public void onOpen(Session session, @PathParam("token") String token) {
         this.session = session;
@@ -65,19 +76,34 @@ public class ChatServer {
             webSocketSet.add(this);
             System.out.println("✅ 用户 " + user.getUsername() + " 连接 WebSocket");
         } else {
-            try { session.close(); } catch (IOException e) {}
+            try {
+                session.close();
+            } catch (IOException e) {
+            }
         }
     }
 
+    /**
+     * WebSocket 连接关闭回调
+     * 移除连接记录
+     */
     @OnClose
     public void onClose() {
         webSocketSet.remove(this);
     }
 
+    /**
+     * 收到客户端消息回调
+     * 核心业务逻辑：解析消息 -> 存库 -> AI生成SQL -> 执行SQL -> AI总结结果 -> 发送回客户端
+     *
+     * @param messageJson 客户端发送的 JSON 消息字符串
+     * @param session     WebSocket 会话
+     */
     @OnMessage
     public void onMessage(String messageJson, Session session) {
         // 0. 安全校验
-        if (this.currentUserId == null) return;
+        if (this.currentUserId == null)
+            return;
 
         try {
             // 1. 解析前端发来的 JSON (格式: { "sessionId": "...", "content": "..." })
@@ -120,7 +146,8 @@ public class ChatServer {
             // 发生异常时通知前端
             try {
                 sendMessage("系统繁忙: " + e.getMessage());
-            } catch (IOException ex) {}
+            } catch (IOException ex) {
+            }
         }
     }
 
@@ -133,7 +160,14 @@ public class ChatServer {
         this.session.getBasicRemote().sendText(message);
     }
 
-    // --- 核心方法 1: 让 AI 写 SQL  ---
+    /**
+     * 核心方法 1: AI 驱动的 SQL 生成
+     * 构建 System Prompt 包含数据库 Schema 和当前时间，请求 DeepSeek 生成查询 SQL
+     *
+     * @param userMessage 用户的问题
+     * @return 生成的 SQL 语句或非查询类的回复
+     */
+    // --- 核心方法 1: 让 AI 写 SQL ---
     private String generateSqlFromAI(String userMessage) {
         // 1. 获取当前真实日期 (关键步骤！)
         String todayDate = java.time.LocalDate.now().toString(); // e.g. "2025-12-10"
@@ -142,40 +176,47 @@ public class ChatServer {
 
         // 2. 定义数据库结构
         String tableSchema = String.format("""
-            【数据库Schema】：
-            表名: invoice_record
-            字段:
-            - id (INT): 主键
-            - user_id (INT): 用户ID (当前用户ID为 %d)
-            - merchant_name (VARCHAR): 商户名称
-            - item_name (VARCHAR): 项目名称
-            - amount (DOUBLE): 金额
-            - date (VARCHAR): 日期 (格式 'YYYY-MM-DD')
-            - category (VARCHAR): 分类 (可选值: %s)
-            """, currentUserId, validCategories);
+                【数据库Schema】：
+                表名: invoice_record
+                字段:
+                - id (INT): 主键
+                - user_id (INT): 用户ID (当前用户ID为 %d)
+                - merchant_name (VARCHAR): 商户名称
+                - item_name (VARCHAR): 项目名称
+                - amount (DOUBLE): 金额
+                - date (VARCHAR): 日期 (格式 'YYYY-MM-DD')
+                - category (VARCHAR): 分类 (可选值: %s)
+                """, currentUserId, validCategories);
 
         // 3. 构建 System Prompt (注入时间 + 增强规则)
         String systemPrompt = String.format("""
-            你是一个 MySQL 专家。
-            
-            【重要上下文】：
-            **今天是：%s** (请根据此日期推算相对时间)
-            - 如果用户问"本月/这个月"，请匹配 date LIKE 'YYYY-MM-%%' (使用当前月份)
-            - 如果用户问"上个月"，请自行推算上个月份
-            - 如果用户问"今年"，请匹配 date LIKE 'YYYY-%%'
-            
-            %s
-            
-            【思维链与规则】：
-            1. **语义映射**：用户用简称时(如"吃饭")，请映射到最接近的 category。
-            2. **模糊查询**：商户或项目名请务必使用 LIKE。
-            3. **安全限制**：必须在 WHERE 子句中包含 user_id = %d。
-            4. **输出格式**：只返回 SQL 语句本身，不要 Markdown，不要解释。
-            """, todayDate, tableSchema, currentUserId);
+                你是一个 MySQL 专家。
+
+                【重要上下文】：
+                **今天是：%s** (请根据此日期推算相对时间)
+                - 如果用户问"本月/这个月"，请匹配 date LIKE 'YYYY-MM-%%' (使用当前月份)
+                - 如果用户问"上个月"，请自行推算上个月份
+                - 如果用户问"今年"，请匹配 date LIKE 'YYYY-%%'
+
+                %s
+
+                【思维链与规则】：
+                1. **语义映射**：用户用简称时(如"吃饭")，请映射到最接近的 category。
+                2. **模糊查询**：商户或项目名请务必使用 LIKE。
+                3. **安全限制**：必须在 WHERE 子句中包含 user_id = %d。
+                4. **输出格式**：只返回 SQL 语句本身，不要 Markdown，不要解释。
+                """, todayDate, tableSchema, currentUserId);
 
         return callDeepSeekApi(systemPrompt, userMessage);
     }
 
+    /**
+     * 核心方法 2: 安全执行 SQL
+     * 拦截非 SELECT 语句，防止注入，执行查询并返回 JSON 结果
+     *
+     * @param sql AI 生成的 SQL 语句
+     * @return 查询结果 JSON 字符串或错误信息
+     */
     // --- 核心方法 2: 执行 SQL ---
     private String executeSqlSafe(String sql) {
         try {
@@ -205,14 +246,22 @@ public class ChatServer {
         }
     }
 
+    /**
+     * 核心方法 3: AI 数据总结
+     * 让 AI 根据数据库查询结果，为用户生成自然语言的回答
+     *
+     * @param userQuestion 用户原始问题
+     * @param dataContext  数据库查询结果 (JSON)
+     * @return 最终回答
+     */
     // --- 核心方法 3: 让 AI 总结数据 ---
     private String summarizeDataWithAI(String userQuestion, String dataContext) {
         String systemPrompt = """
-            你是一个财务数据分析师。
-            用户问了一个问题，系统执行 SQL 后得到了以下 JSON 数据。
-            请根据这些数据，用简洁、专业的语言回答用户的问题。
-            如果数据量很大，只总结关键趋势或总数。
-            """;
+                你是一个财务数据分析师。
+                用户问了一个问题，系统执行 SQL 后得到了以下 JSON 数据。
+                请根据这些数据，用简洁、专业的语言回答用户的问题。
+                如果数据量很大，只总结关键趋势或总数。
+                """;
 
         String userPrompt = String.format("用户问题：%s\n数据库返回结果：%s", userQuestion, dataContext);
 
@@ -241,7 +290,8 @@ public class ChatServer {
                     .body();
 
             JSONObject jsonResponse = new JSONObject(response);
-            if (jsonResponse.has("error")) return "Error: " + jsonResponse.get("error");
+            if (jsonResponse.has("error"))
+                return "Error: " + jsonResponse.get("error");
 
             return jsonResponse.getJSONArray("choices")
                     .getJSONObject(0).getJSONObject("message").getString("content");
@@ -250,6 +300,13 @@ public class ChatServer {
         }
     }
 
+    /**
+     * 保存聊天记录到数据库
+     *
+     * @param role      角色 (user/ai)
+     * @param content   消息内容
+     * @param sessionId 会话ID
+     */
     // 修改后的 saveLog 方法：接收 3 个参数
     private void saveLog(String role, String content, String sessionId) {
         try {
