@@ -6,6 +6,10 @@ import org.json.JSONObject;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+/**
+ * DeepSeek AI 服务封装
+ * 负责调用 DeepSeek 大模型 API 进行文本分析、SQL生成等任务
+ */
 @Service
 public class DeepSeekService {
 
@@ -15,6 +19,13 @@ public class DeepSeekService {
     @Value("${deepseek.api.url}")
     private String apiUrl;
 
+    /**
+     * 调用 DeepSeek API
+     *
+     * @param systemPrompt 系统预设 (System Prompt)
+     * @param userMessage  用户输入的 prompt
+     * @return AI 的回复内容
+     */
     public String callAi(String systemPrompt, String userMessage) {
         try {
             JSONObject body = new JSONObject();
