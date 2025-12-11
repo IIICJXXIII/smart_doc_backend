@@ -22,28 +22,82 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * OCR 识别服务 - 基于百度 AI 的发票识别核心服务
+ * 
+ * <p>使用百度 OCR API 实现多种类型票据的自动识别，
+ * 采用"智能财务票据识别优先 + 通用文字识别兜底"的双层策略。</p>
+ * 
+ * <h3>支持的票据类型:</h3>
+ * <ul>
+ *   <li>增值税发票 (vat_invoice)</li>
+ *   <li>火车票 (train_ticket)</li>
+ *   <li>机票行程单 (air_ticket)</li>
+ *   <li>出租车票 (taxi_receipt)</li>
+ *   <li>网约车发票 (taxi_online_ticket)</li>
+ *   <li>定额发票 (quota_invoice)</li>
+ *   <li>其他票据 → 通用识别 + 正则提取</li>
+ * </ul>
+ * 
+ * <h3>识别策略:</h3>
+ * <pre>
+ * 1. 优先调用 multipleInvoice (智能财务票据识别)
+ * 2. 若无法识别或结构不完整，降级到 basicAccurateGeneral (通用文字识别)
+ * 3. 通用识别时使用正则表达式提取金额、日期等关键信息
+ * </pre>
+ * 
+ * <h3>配置项:</h3>
+ * <pre>
+ * baidu.ocr.app-id=xxx
+ * baidu.ocr.api-key=xxx
+ * baidu.ocr.secret-key=xxx
+ * </pre>
+ * 
+ * @author SmartDoc Team
+ * @see com.example.smartdoc.controller.DocController
+ */
 @Service
 public class OcrService {
 
+    /** 百度 OCR 应用 ID */
     @Value("${baidu.ocr.app-id}")
     private String appId;
+    
+    /** 百度 OCR API Key */
     @Value("${baidu.ocr.api-key}")
     private String apiKey;
+    
+    /** 百度 OCR Secret Key */
     @Value("${baidu.ocr.secret-key}")
     private String secretKey;
 
+    /** 百度 OCR 客户端实例 */
     private AipOcr client;
 
+    /**
+     * 初始化百度 OCR 客户端
+     * <p>在 Spring Bean 创建后自动执行，配置连接超时参数。</p>
+     */
     @PostConstruct
     public void init() {
         client = new AipOcr(appId, apiKey, secretKey);
-        client.setConnectionTimeoutInMillis(2000);
-        client.setSocketTimeoutInMillis(60000);
+        client.setConnectionTimeoutInMillis(2000);   // 连接超时 2秒
+        client.setSocketTimeoutInMillis(60000);      // 读取超时 60秒
     }
 
+    /**
+     * 处理上传的发票文档
+     * <p>支持图片和 PDF 格式，PDF 会先转换为图片再识别。</p>
+     * 
+     * @param file 上传的发票文件
+     * @return 识别后的发票数据对象
+     * @throws IOException 文件读取异常
+     */
     public InvoiceData processDocument(MultipartFile file) throws IOException {
         byte[] fileBytes;
         String fileName = file.getOriginalFilename();
+        
+        // PDF 文件需要先转换为图片
         if (fileName != null && fileName.toLowerCase().endsWith(".pdf")) {
             fileBytes = convertPdfToJpg(file.getBytes());
         } else {
@@ -54,14 +108,17 @@ public class OcrService {
     }
 
     /**
-     * 策略 A: 智能财务票据识别
-     * 注意：此接口参数必须为 HashMap<String, Object>
+     * 策略 A: 智能财务票据识别 (优先策略)
+     * <p>调用百度 multipleInvoice 接口，可自动识别多种票据类型并返回结构化数据。</p>
+     * 
+     * @param imageBytes 图片字节数组
+     * @return 识别后的发票数据
      */
     private InvoiceData callSmartFinanceOcr(byte[] imageBytes) {
         try {
-            // 🟢 这里的泛型是 <String, Object>
+            // 设置识别参数（注意: multipleInvoice 接口要求 HashMap<String, Object>）
             HashMap<String, Object> options = new HashMap<>();
-            options.put("probability", "true");
+            options.put("probability", "true");  // 返回置信度
 
             JSONObject res = client.multipleInvoice(imageBytes, options);
 
@@ -69,9 +126,11 @@ public class OcrService {
                 JSONArray results = res.getJSONArray("words_result");
                 if (results.length() == 0) return callGeneralOcr(imageBytes);
 
+                // 取第一个识别结果（通常是主票据）
                 JSONObject bestTicket = results.getJSONObject(0);
                 String type = bestTicket.optString("type", "unknown");
 
+                // 检查是否有详细结构化数据
                 if (!bestTicket.has("result")) {
                     System.out.println("⚠️ 票据类型 [" + type + "] 不含详细结构，切换通用识别...");
                     return callGeneralOcr(imageBytes);
@@ -81,6 +140,7 @@ public class OcrService {
                 InvoiceData data = new InvoiceData();
                 data.setRawImageUrl("memory_image");
 
+                // 根据票据类型调用对应的解析方法
                 switch (type) {
                     case "vat_invoice":
                         parseVatInvoice(content, data);
@@ -101,6 +161,7 @@ public class OcrService {
                         parseTaxiOnline(content, data);
                         break;
                     default:
+                        // 未知类型使用通用提取
                         data.setMerchantName("票据类型: " + type);
                         data.setCategory("其他");
                         data.setAmount(getDouble(content, "Amount", "TotalAmount", "total_fare", "fare", "money"));
@@ -113,12 +174,16 @@ public class OcrService {
         } catch (Exception e) {
             e.printStackTrace();
         }
+        // 降级到通用识别
         return callGeneralOcr(imageBytes);
     }
 
     /**
-     * 策略 B: 通用文字识别 (正则提取)
-     * 注意：此接口参数必须为 HashMap<String, String>，否则会报编译错误
+     * 策略 B: 通用文字识别 (兜底策略)
+     * <p>当智能财务票据识别失败时，使用通用 OCR + 正则表达式提取关键信息。</p>
+     * 
+     * @param imageBytes 图片字节数组
+     * @return 识别后的发票数据
      */
     private InvoiceData callGeneralOcr(byte[] imageBytes) {
         InvoiceData data = new InvoiceData();
@@ -127,9 +192,9 @@ public class OcrService {
         data.setItemName("扫描件");
 
         try {
-            // 🔴 关键修复：这里的泛型必须改回 <String, String>
+            // 设置识别参数（注意: basicAccurateGeneral 接口要求 HashMap<String, String>）
             HashMap<String, String> options = new HashMap<>();
-            options.put("detect_direction", "true");
+            options.put("detect_direction", "true");  // 自动检测图片方向
 
             JSONObject res = client.basicAccurateGeneral(imageBytes, options);
 
@@ -142,8 +207,12 @@ public class OcrService {
         return data;
     }
 
-    // ================= 专用解析方法区 =================
+    // ==================== 专用票据解析方法 ====================
 
+    /**
+     * 解析火车票
+     * <p>提取车次、出发站、到达站、票价、日期等信息。</p>
+     */
     private void parseTrainTicket(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
         String trainNum = getValue(r, "train_num");
@@ -161,6 +230,10 @@ public class OcrService {
         data.setInvoiceCode(getValue(r, "ticket_num"));
     }
 
+    /**
+     * 解析机票行程单
+     * <p>提取航空公司、航班号、起降站、票价等信息。</p>
+     */
     private void parseAirTicket(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
         String carrier = getValue(r, "carrier");
@@ -180,6 +253,10 @@ public class OcrService {
         data.setInvoiceCode(getValue(r, "ticket_number"));
     }
 
+    /**
+     * 解析出租车票
+     * <p>提取车牌号、车费、日期等信息。</p>
+     */
     private void parseTaxiReceipt(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
         data.setItemName("出租车费");
@@ -189,6 +266,10 @@ public class OcrService {
         data.setInvoiceCode(getValue(r, "InvoiceCode"));
     }
 
+    /**
+     * 解析网约车发票
+     * <p>提取服务商、行程费用、日期等信息。</p>
+     */
     private void parseTaxiOnline(JSONObject r, InvoiceData data) {
         data.setCategory("交通出行");
         String provider = getValue(r, "service_provider");
@@ -198,6 +279,10 @@ public class OcrService {
         data.setDate(getValue(r, "application_date"));
     }
 
+    /**
+     * 解析增值税发票
+     * <p>提取销售方名称、金额、日期、发票号码等信息。</p>
+     */
     private void parseVatInvoice(JSONObject r, InvoiceData data) {
         data.setMerchantName(getValue(r, "SellerName"));
         data.setAmount(getDouble(r, "TotalAmount", "AmountInFiguers"));
@@ -208,6 +293,10 @@ public class OcrService {
         data.setItemName(item != null ? item : "办公用品/服务费");
     }
 
+    /**
+     * 解析定额发票
+     * <p>定额发票通常用于餐饮消费，提取金额和发票号码。</p>
+     */
     private void parseQuotaInvoice(JSONObject r, InvoiceData data) {
         data.setCategory("餐饮美食");
         data.setAmount(getDouble(r, "invoice_rate", "invoice_rate_in_figure"));
@@ -216,12 +305,21 @@ public class OcrService {
         data.setItemName("定额消费");
     }
 
-    // --- 通用正则解析 ---
+    /**
+     * 通用文字识别结果解析
+     * <p>使用正则表达式从 OCR 文字结果中提取金额、日期、类别等信息。
+     * 金额提取策略：找出所有金额格式的数字，取最大值（通常是总金额）。
+     * 日期提取策略：匹配 2020-2029 年的日期格式。
+     * 类别识别：根据关键词判断消费类别。</p>
+     */
     private void parseWordsToInvoice(JSONArray words, InvoiceData data) {
+        // 将所有识别文字合并为行列表
         List<String> lines = new ArrayList<>();
         for (int i = 0; i < words.length(); i++) {
             lines.add(words.getJSONObject(i).getString("words"));
         }
+        
+        // 提取金额（找最大值，假设为总金额）
         double maxAmount = 0.0;
         for (String line : lines) {
             Matcher m = Pattern.compile("(\\d{1,3}(,\\d{3})*\\.\\d{2})").matcher(line);
@@ -233,6 +331,8 @@ public class OcrService {
             }
         }
         if (maxAmount > 0) data.setAmount(maxAmount);
+        
+        // 提取日期（匹配 202X年XX月XX日 或 202X-XX-XX 格式）
         for (String line : lines) {
             Matcher m = Pattern.compile("202\\d[-年/.]\\d{1,2}[-月/.]\\d{1,2}").matcher(line);
             if (m.find()) {
@@ -240,13 +340,23 @@ public class OcrService {
                 break;
             }
         }
+        
+        // 根据关键词推断消费类别
         String fullText = String.join(" ", lines);
         if (fullText.contains("餐饮") || fullText.contains("饭")) data.setCategory("餐饮美食");
         else if (fullText.contains("车") || fullText.contains("交通")) data.setCategory("交通出行");
     }
 
-    // ================= 工具方法 =================
+    // ==================== 工具方法 ====================
 
+    /**
+     * 从百度 OCR 返回的 JSON 结构中提取字段值
+     * <p>百度 OCR 的字段值是数组格式 [{word: "xxx"}]，此方法处理该结构。</p>
+     * 
+     * @param obj          OCR 结果 JSON 对象
+     * @param possibleKeys 可能的字段名（支持多个备选）
+     * @return 提取的字符串值，未找到返回 null
+     */
     private String getValue(JSONObject obj, String... possibleKeys) {
         for (String key : possibleKeys) {
             if (obj.has(key)) {
@@ -259,6 +369,14 @@ public class OcrService {
         return null;
     }
 
+    /**
+     * 从百度 OCR 返回的 JSON 结构中提取数值
+     * <p>自动清理非数字字符后解析为 Double。</p>
+     * 
+     * @param obj  OCR 结果 JSON 对象
+     * @param keys 可能的字段名
+     * @return 提取的数值，解析失败返回 0.0
+     */
     private Double getDouble(JSONObject obj, String... keys) {
         String val = getValue(obj, keys);
         if (val != null) {
@@ -270,21 +388,40 @@ public class OcrService {
         return 0.0;
     }
 
+    /**
+     * 数据后处理 - 标准化日期格式和补全默认值
+     * <p>将各种日期格式统一转换为 yyyy-MM-dd 格式，
+     * 并为缺失的类别设置默认值。</p>
+     * 
+     * @param data 待处理的发票数据
+     */
     private void postProcess(InvoiceData data) {
+        // 标准化日期格式
         if (data.getDate() != null) {
             String d = data.getDate().replaceAll("[年月/.]", "-").replace("日", "");
             Matcher m = Pattern.compile("\\d{4}-\\d{1,2}-\\d{1,2}").matcher(d);
             if (m.find()) data.setDate(m.group());
         }
+        // 默认类别为"其他"
         if (data.getCategory() == null) {
             data.setCategory("其他");
         }
     }
 
+    /**
+     * PDF 转 JPG 图片
+     * <p>使用 Apache PDFBox 将 PDF 首页渲染为 JPG 图片，
+     * 以便发送给百度 OCR 进行识别。</p>
+     * 
+     * @param pdfBytes PDF 文件字节数组
+     * @return JPG 图片字节数组
+     * @throws IOException 转换异常
+     */
     private byte[] convertPdfToJpg(byte[] pdfBytes) throws IOException {
         try (PDDocument document = PDDocument.load(pdfBytes);
              ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             PDFRenderer renderer = new PDFRenderer(document);
+            // 以 2.0 倍缩放渲染首页，RGB 格式
             BufferedImage image = renderer.renderImage(0, 2.0f, ImageType.RGB);
             ImageIO.write(image, "jpg", baos);
             return baos.toByteArray();
